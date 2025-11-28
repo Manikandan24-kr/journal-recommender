@@ -20,8 +20,10 @@ services:
         fromDatabase:
           name: journal-db
           property: connectionString
-      - key: OPENAI_API_KEY
-        sync: false  # You'll set this manually in Render dashboard
+      # OPENAI_API_KEY - Not required currently (keyword-based matching is used)
+      # Uncomment below if you add LLM-powered recommendations in the future
+      # - key: OPENAI_API_KEY
+      #   sync: false
     healthCheckPath: /api/health
 
   # Frontend
