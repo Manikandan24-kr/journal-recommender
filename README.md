@@ -116,6 +116,75 @@ Edit `backend/src/data/journals.ts` to add new journals:
 
 Edit `backend/src/services/llmService.ts` to customize how the LLM analyzes manuscripts and generates recommendations.
 
+## AWS Deployment (ECS)
+
+### Prerequisites
+
+- Docker installed and running
+- AWS CLI credentials (for the deployment container)
+
+### Setup
+
+1. **Copy the deployment environment template:**
+   ```bash
+   cp .env.deploy.example .env.deploy
+   ```
+
+2. **Edit `.env.deploy` with your AWS credentials and configuration:**
+   ```bash
+   # Required values:
+   AWS_ACCESS_KEY_ID=your-access-key
+   AWS_SECRET_ACCESS_KEY=your-secret-key
+   AWS_DEFAULT_REGION=us-east-1
+   AWS_ACCOUNT_ID=your-account-id
+
+   # Database (using existing RDS instance)
+   RDS_HOST=your-rds-endpoint
+   RDS_DATABASE=journal_recommender
+   RDS_USERNAME=your-db-user
+   RDS_PASSWORD=your-db-password
+   ```
+
+### Deployment Commands
+
+```bash
+# First-time setup: Create ECR repos, ECS cluster, ALB target groups
+./scripts/deploy.sh setup
+
+# Initialize database schema
+./scripts/deploy.sh db-setup
+
+# Full deployment: Build, push, and deploy
+./scripts/deploy.sh all
+
+# Individual steps:
+./scripts/deploy.sh build    # Build Docker images only
+./scripts/deploy.sh push     # Push to ECR only
+./scripts/deploy.sh deploy   # Update ECS services only
+```
+
+### Architecture
+
+```
+                    ┌─────────────────┐
+                    │  ALB            │
+                    │  (bibmanager)   │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+       ┌──────▼──────┐ ┌─────▼──────┐      │
+       │  Frontend   │ │  Backend   │      │
+       │  (Nginx)    │ │  (Node.js) │      │
+       │  Port 80    │ │  Port 3001 │      │
+       └─────────────┘ └──────┬─────┘      │
+                              │            │
+                       ┌──────▼──────┐     │
+                       │    RDS      │     │
+                       │  PostgreSQL │     │
+                       └─────────────┘     │
+```
+
 ## Color Scheme
 
 The UI follows Kriyadocs brand colors:

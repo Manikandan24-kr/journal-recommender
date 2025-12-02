@@ -1,0 +1,445 @@
+#!/bin/bash
+set -e
+
+# =============================================================================
+# Journal Recommender - AWS Deployment Script
+# =============================================================================
+# This script builds Docker images, pushes to ECR, and updates ECS services.
+#
+# Usage:
+#   ./scripts/deploy.sh [command]
+#
+# Commands:
+#   all         - Run full deployment (default)
+#   setup       - Create ECR repos, ECS cluster, task definitions, ALB config
+#   build       - Build Docker images only
+#   push        - Push images to ECR only
+#   deploy      - Update ECS services only
+#   db-setup    - Initialize database schema
+#
+# Prerequisites:
+#   - Docker installed and running
+#   - .env.deploy file with AWS credentials (copy from .env.deploy.example)
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Load environment variables
+load_env() {
+    if [ -f "$PROJECT_ROOT/.env.deploy" ]; then
+        log_info "Loading environment from .env.deploy"
+        set -a
+        source "$PROJECT_ROOT/.env.deploy"
+        set +a
+    else
+        log_error ".env.deploy not found. Copy .env.deploy.example and fill in your values."
+        exit 1
+    fi
+
+    # Validate required variables
+    required_vars=(
+        "AWS_ACCESS_KEY_ID"
+        "AWS_SECRET_ACCESS_KEY"
+        "AWS_DEFAULT_REGION"
+        "AWS_ACCOUNT_ID"
+        "ECR_BACKEND_REPO"
+        "ECR_FRONTEND_REPO"
+        "RDS_HOST"
+        "RDS_DATABASE"
+        "RDS_USERNAME"
+        "RDS_PASSWORD"
+    )
+
+    for var in "${required_vars[@]}"; do
+        if [ -z "${!var}" ]; then
+            log_error "Required variable $var is not set in .env.deploy"
+            exit 1
+        fi
+    done
+
+    # Derived variables
+    ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_BACKEND_REPO}"
+    FRONTEND_IMAGE="${ECR_REGISTRY}/${ECR_FRONTEND_REPO}"
+    DATABASE_URL="postgresql://${RDS_USERNAME}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/${RDS_DATABASE}"
+}
+
+# Run AWS CLI command (via Docker or local)
+aws_cli() {
+    if command -v aws &> /dev/null; then
+        aws "$@"
+    else
+        docker run --rm \
+            -e AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY \
+            -e AWS_DEFAULT_REGION \
+            amazon/aws-cli "$@"
+    fi
+}
+
+# ECR login
+ecr_login() {
+    log_info "Logging into ECR..."
+    aws_cli ecr get-login-password --region "$AWS_DEFAULT_REGION" | \
+        docker login --username AWS --password-stdin "$ECR_REGISTRY"
+}
+
+# Create ECR repositories
+create_ecr_repos() {
+    log_info "Creating ECR repositories..."
+
+    for repo in "$ECR_BACKEND_REPO" "$ECR_FRONTEND_REPO"; do
+        if aws_cli ecr describe-repositories --repository-names "$repo" 2>/dev/null; then
+            log_warn "Repository $repo already exists"
+        else
+            aws_cli ecr create-repository \
+                --repository-name "$repo" \
+                --image-scanning-configuration scanOnPush=false
+            log_info "Created repository: $repo"
+        fi
+    done
+}
+
+# Build Docker images
+build_images() {
+    log_info "Building Docker images..."
+
+    cd "$PROJECT_ROOT"
+
+    # Build backend
+    log_info "Building backend image..."
+    docker build -t "${ECR_BACKEND_REPO}:latest" -f backend/Dockerfile backend/
+
+    # Build frontend with API URL
+    log_info "Building frontend image..."
+    docker build \
+        -t "${ECR_FRONTEND_REPO}:latest" \
+        --build-arg VITE_API_URL="${API_URL:-http://localhost:3001}" \
+        -f frontend/Dockerfile frontend/
+
+    log_info "Images built successfully"
+}
+
+# Tag and push images to ECR
+push_images() {
+    log_info "Pushing images to ECR..."
+
+    ecr_login
+
+    # Tag and push backend
+    docker tag "${ECR_BACKEND_REPO}:latest" "${BACKEND_IMAGE}:latest"
+    docker push "${BACKEND_IMAGE}:latest"
+    log_info "Pushed: ${BACKEND_IMAGE}:latest"
+
+    # Tag and push frontend
+    docker tag "${ECR_FRONTEND_REPO}:latest" "${FRONTEND_IMAGE}:latest"
+    docker push "${FRONTEND_IMAGE}:latest"
+    log_info "Pushed: ${FRONTEND_IMAGE}:latest"
+}
+
+# Create ECS cluster
+create_ecs_cluster() {
+    log_info "Creating ECS cluster..."
+
+    CLUSTER_NAME="${ECS_CLUSTER:-journal-recommender-cluster}"
+
+    if aws_cli ecs describe-clusters --clusters "$CLUSTER_NAME" --query "clusters[?status=='ACTIVE']" | grep -q "$CLUSTER_NAME"; then
+        log_warn "Cluster $CLUSTER_NAME already exists"
+    else
+        aws_cli ecs create-cluster --cluster-name "$CLUSTER_NAME"
+        log_info "Created cluster: $CLUSTER_NAME"
+    fi
+}
+
+# Create ECS task definitions
+create_task_definitions() {
+    log_info "Creating ECS task definitions..."
+
+    # Backend task definition
+    cat > /tmp/backend-task-def.json << EOF
+{
+    "family": "journal-recommender-backend",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "256",
+    "memory": "512",
+    "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+    "containerDefinitions": [
+        {
+            "name": "backend",
+            "image": "${BACKEND_IMAGE}:latest",
+            "essential": true,
+            "portMappings": [
+                {
+                    "containerPort": 3001,
+                    "protocol": "tcp"
+                }
+            ],
+            "environment": [
+                {"name": "NODE_ENV", "value": "production"},
+                {"name": "PORT", "value": "3001"},
+                {"name": "DATABASE_URL", "value": "${DATABASE_URL}"}
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/journal-recommender-backend",
+                    "awslogs-region": "${AWS_DEFAULT_REGION}",
+                    "awslogs-stream-prefix": "ecs",
+                    "awslogs-create-group": "true"
+                }
+            }
+        }
+    ]
+}
+EOF
+
+    aws_cli ecs register-task-definition --cli-input-json file:///tmp/backend-task-def.json
+    log_info "Registered backend task definition"
+
+    # Frontend task definition
+    cat > /tmp/frontend-task-def.json << EOF
+{
+    "family": "journal-recommender-frontend",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "256",
+    "memory": "512",
+    "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+    "containerDefinitions": [
+        {
+            "name": "frontend",
+            "image": "${FRONTEND_IMAGE}:latest",
+            "essential": true,
+            "portMappings": [
+                {
+                    "containerPort": 80,
+                    "protocol": "tcp"
+                }
+            ],
+            "environment": [
+                {"name": "API_URL", "value": "${API_URL:-http://localhost:3001}"}
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/journal-recommender-frontend",
+                    "awslogs-region": "${AWS_DEFAULT_REGION}",
+                    "awslogs-stream-prefix": "ecs",
+                    "awslogs-create-group": "true"
+                }
+            }
+        }
+    ]
+}
+EOF
+
+    aws_cli ecs register-task-definition --cli-input-json file:///tmp/frontend-task-def.json
+    log_info "Registered frontend task definition"
+
+    rm -f /tmp/backend-task-def.json /tmp/frontend-task-def.json
+}
+
+# Setup ALB target groups
+setup_alb_target_groups() {
+    log_info "Setting up ALB target groups..."
+
+    # Get VPC ID from ALB
+    ALB_ARN=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME:-bibmanager-alb}" --query "LoadBalancers[0].LoadBalancerArn" --output text)
+    VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME:-bibmanager-alb}" --query "LoadBalancers[0].VpcId" --output text)
+
+    log_info "Using ALB: $ALB_ARN"
+    log_info "VPC: $VPC_ID"
+
+    # Create backend target group
+    if ! aws_cli elbv2 describe-target-groups --names "journal-rec-backend-tg" 2>/dev/null; then
+        aws_cli elbv2 create-target-group \
+            --name "journal-rec-backend-tg" \
+            --protocol HTTP \
+            --port 3001 \
+            --vpc-id "$VPC_ID" \
+            --target-type ip \
+            --health-check-path "/api/health" \
+            --health-check-interval-seconds 30
+        log_info "Created backend target group"
+    else
+        log_warn "Backend target group already exists"
+    fi
+
+    # Create frontend target group
+    if ! aws_cli elbv2 describe-target-groups --names "journal-rec-frontend-tg" 2>/dev/null; then
+        aws_cli elbv2 create-target-group \
+            --name "journal-rec-frontend-tg" \
+            --protocol HTTP \
+            --port 80 \
+            --vpc-id "$VPC_ID" \
+            --target-type ip \
+            --health-check-path "/health" \
+            --health-check-interval-seconds 30
+        log_info "Created frontend target group"
+    else
+        log_warn "Frontend target group already exists"
+    fi
+}
+
+# Create/Update ECS services
+create_ecs_services() {
+    log_info "Creating/Updating ECS services..."
+
+    CLUSTER_NAME="${ECS_CLUSTER:-journal-recommender-cluster}"
+
+    # Get subnet and security group info (you may need to customize these)
+    VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME:-bibmanager-alb}" --query "LoadBalancers[0].VpcId" --output text)
+    SUBNETS=$(aws_cli ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query "Subnets[?MapPublicIpOnLaunch==\`true\`].SubnetId" --output text | tr '\t' ',')
+
+    # Get or create security group
+    SG_ID=$(aws_cli ec2 describe-security-groups --filters "Name=group-name,Values=journal-recommender-ecs-sg" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+
+    if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
+        log_info "Creating security group..."
+        SG_ID=$(aws_cli ec2 create-security-group \
+            --group-name "journal-recommender-ecs-sg" \
+            --description "Security group for Journal Recommender ECS tasks" \
+            --vpc-id "$VPC_ID" \
+            --query "GroupId" --output text)
+
+        # Allow inbound traffic on ports 80 and 3001
+        aws_cli ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0
+        aws_cli ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3001 --cidr 0.0.0.0/0
+        # Allow outbound traffic
+        aws_cli ec2 authorize-security-group-egress --group-id "$SG_ID" --protocol -1 --cidr 0.0.0.0/0 2>/dev/null || true
+    fi
+
+    log_info "Using security group: $SG_ID"
+    log_info "Using subnets: $SUBNETS"
+
+    # Get target group ARNs
+    BACKEND_TG_ARN=$(aws_cli elbv2 describe-target-groups --names "journal-rec-backend-tg" --query "TargetGroups[0].TargetGroupArn" --output text)
+    FRONTEND_TG_ARN=$(aws_cli elbv2 describe-target-groups --names "journal-rec-frontend-tg" --query "TargetGroups[0].TargetGroupArn" --output text)
+
+    # Create or update backend service
+    if aws_cli ecs describe-services --cluster "$CLUSTER_NAME" --services "journal-recommender-backend" --query "services[?status=='ACTIVE']" | grep -q "journal-recommender-backend"; then
+        log_info "Updating backend service..."
+        aws_cli ecs update-service \
+            --cluster "$CLUSTER_NAME" \
+            --service "journal-recommender-backend" \
+            --task-definition "journal-recommender-backend" \
+            --force-new-deployment
+    else
+        log_info "Creating backend service..."
+        aws_cli ecs create-service \
+            --cluster "$CLUSTER_NAME" \
+            --service-name "journal-recommender-backend" \
+            --task-definition "journal-recommender-backend" \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
+            --load-balancers "targetGroupArn=$BACKEND_TG_ARN,containerName=backend,containerPort=3001"
+    fi
+
+    # Create or update frontend service
+    if aws_cli ecs describe-services --cluster "$CLUSTER_NAME" --services "journal-recommender-frontend" --query "services[?status=='ACTIVE']" | grep -q "journal-recommender-frontend"; then
+        log_info "Updating frontend service..."
+        aws_cli ecs update-service \
+            --cluster "$CLUSTER_NAME" \
+            --service "journal-recommender-frontend" \
+            --task-definition "journal-recommender-frontend" \
+            --force-new-deployment
+    else
+        log_info "Creating frontend service..."
+        aws_cli ecs create-service \
+            --cluster "$CLUSTER_NAME" \
+            --service-name "journal-recommender-frontend" \
+            --task-definition "journal-recommender-frontend" \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
+            --load-balancers "targetGroupArn=$FRONTEND_TG_ARN,containerName=frontend,containerPort=80"
+    fi
+
+    log_info "ECS services created/updated"
+}
+
+# Initialize database
+setup_database() {
+    log_info "Setting up database..."
+
+    # Run init.sql against RDS
+    if command -v psql &> /dev/null; then
+        PGPASSWORD="$RDS_PASSWORD" psql \
+            -h "$RDS_HOST" \
+            -U "$RDS_USERNAME" \
+            -d "$RDS_DATABASE" \
+            -f "$PROJECT_ROOT/backend/database/init.sql"
+    else
+        # Use Docker to run psql
+        docker run --rm \
+            -e PGPASSWORD="$RDS_PASSWORD" \
+            -v "$PROJECT_ROOT/backend/database/init.sql:/init.sql:ro" \
+            postgres:16-alpine \
+            psql -h "$RDS_HOST" -U "$RDS_USERNAME" -d "$RDS_DATABASE" -f /init.sql
+    fi
+
+    log_info "Database initialized"
+}
+
+# Full setup (first-time deployment)
+setup() {
+    log_info "Running initial setup..."
+    create_ecr_repos
+    create_ecs_cluster
+    setup_alb_target_groups
+    create_task_definitions
+}
+
+# Full deployment
+deploy_all() {
+    log_info "Running full deployment..."
+    build_images
+    push_images
+    create_ecs_services
+    log_info "Deployment complete!"
+}
+
+# Main
+main() {
+    load_env
+
+    case "${1:-all}" in
+        setup)
+            setup
+            ;;
+        build)
+            build_images
+            ;;
+        push)
+            push_images
+            ;;
+        deploy)
+            create_ecs_services
+            ;;
+        db-setup)
+            setup_database
+            ;;
+        all)
+            deploy_all
+            ;;
+        *)
+            echo "Usage: $0 {setup|build|push|deploy|db-setup|all}"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
