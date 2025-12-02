@@ -47,6 +47,18 @@ export interface PaginatedResponse<T> {
   };
 }
 
+// Generate journal website URL using ISSN portal (works for all publishers)
+function getJournalWebsiteUrl(issns: string[] | undefined, title: string): string {
+  // Use ISSN portal if ISSN is available - this is publisher-agnostic
+  if (issns && issns.length > 0) {
+    // Clean the ISSN (remove any spaces) and use the first one
+    const cleanIssn = issns[0].replace(/\s/g, '');
+    return `https://portal.issn.org/resource/ISSN/${cleanIssn}`;
+  }
+  // Fallback to Google Scholar search by journal title
+  return `https://scholar.google.com/scholar?q="${encodeURIComponent(title)}"`;
+}
+
 // Transform backend journal to frontend format
 function transformJournal(backendJournal: any): Journal {
   // Parse numeric values (PostgreSQL returns DECIMAL as strings)
@@ -58,13 +70,13 @@ function transformJournal(backendJournal: any): Journal {
     id: backendJournal.id || backendJournal.source_id,
     name: backendJournal.title,
     abbreviation: backendJournal.title.split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 5),
-    publisher: backendJournal.publisher || 'World Scientific',
+    publisher: backendJournal.publisher || 'Unknown Publisher',
     scope: backendJournal.scope_text || backendJournal.scope || '',
     subjects: backendJournal.areas || [],
     openAccess: backendJournal.open_access || false,
     reviewTime: '6-8 weeks',
     acceptanceRate: 25 + Math.floor(Math.random() * 30),
-    website: `https://www.worldscientific.com/worldscinet/${backendJournal.source_id}`,
+    website: getJournalWebsiteUrl(backendJournal.issns, backendJournal.title),
     language: 'English',
     frequency: 'Monthly',
     indexedIn: ['Scimago'],  // Data source: Scimago Journal Rankings
