@@ -1,0 +1,47 @@
+# Dependencies
+node_modules
+*/node_modules
+
+# Build outputs
+backend/dist
+frontend/dist
+
+# Development files
+.git
+.gitignore
+*.md
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+coverage
+*.test.ts
+*.spec.ts
+
+# Docker files (avoid recursive inclusion)
+docker-compose*.yml
+Dockerfile.*
+
+# Temporary files
+tmp
+temp
+uploads/*
+!uploads/.gitkeep
+
+# Keep data directory for seeding
+!data/
