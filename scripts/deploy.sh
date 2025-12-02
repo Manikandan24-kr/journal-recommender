@@ -168,134 +168,124 @@ create_ecs_cluster() {
 create_task_definitions() {
     log_info "Creating ECS task definitions..."
 
-    # Backend task definition
-    TASK_DEF_DIR="$PROJECT_ROOT/.task-definitions"
-    mkdir -p "$TASK_DEF_DIR"
-
-    cat > "$TASK_DEF_DIR/backend-task-def.json" << EOF
-{
-    "family": "journal-recommender-backend",
-    "networkMode": "awsvpc",
-    "requiresCompatibilities": ["FARGATE"],
-    "cpu": "256",
-    "memory": "512",
-    "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
-    "containerDefinitions": [
-        {
-            "name": "backend",
-            "image": "${BACKEND_IMAGE}:latest",
-            "essential": true,
-            "portMappings": [
-                {
-                    "containerPort": 3001,
-                    "protocol": "tcp"
-                }
-            ],
-            "environment": [
-                {"name": "NODE_ENV", "value": "production"},
-                {"name": "PORT", "value": "3001"},
-                {"name": "DATABASE_URL", "value": "${DATABASE_URL}"}
-            ],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": "/ecs/journal-recommender-backend",
-                    "awslogs-region": "${AWS_DEFAULT_REGION}",
-                    "awslogs-stream-prefix": "ecs",
-                    "awslogs-create-group": "true"
+    # Backend task definition - use env vars from .env.deploy
+    aws_cli ecs register-task-definition --cli-input-json "{
+        \"family\": \"${ECS_SERVICE_BACKEND}\",
+        \"networkMode\": \"awsvpc\",
+        \"requiresCompatibilities\": [\"FARGATE\"],
+        \"cpu\": \"256\",
+        \"memory\": \"512\",
+        \"executionRoleArn\": \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole\",
+        \"containerDefinitions\": [
+            {
+                \"name\": \"backend\",
+                \"image\": \"${BACKEND_IMAGE}:latest\",
+                \"essential\": true,
+                \"portMappings\": [
+                    {
+                        \"containerPort\": 3001,
+                        \"protocol\": \"tcp\"
+                    }
+                ],
+                \"environment\": [
+                    {\"name\": \"NODE_ENV\", \"value\": \"production\"},
+                    {\"name\": \"PORT\", \"value\": \"3001\"},
+                    {\"name\": \"DATABASE_URL\", \"value\": \"${DATABASE_URL}\"}
+                ],
+                \"logConfiguration\": {
+                    \"logDriver\": \"awslogs\",
+                    \"options\": {
+                        \"awslogs-group\": \"/ecs/${ECS_SERVICE_BACKEND}\",
+                        \"awslogs-region\": \"${AWS_DEFAULT_REGION}\",
+                        \"awslogs-stream-prefix\": \"ecs\",
+                        \"awslogs-create-group\": \"true\"
+                    }
                 }
             }
-        }
-    ]
-}
-EOF
+        ]
+    }" >/dev/null
+    log_info "Registered backend task definition: ${ECS_SERVICE_BACKEND}"
 
-    aws_cli ecs register-task-definition --cli-input-json "file://$TASK_DEF_DIR/backend-task-def.json" >/dev/null
-    log_info "Registered backend task definition"
-
-    # Frontend task definition
-    cat > "$TASK_DEF_DIR/frontend-task-def.json" << EOF
-{
-    "family": "journal-recommender-frontend",
-    "networkMode": "awsvpc",
-    "requiresCompatibilities": ["FARGATE"],
-    "cpu": "256",
-    "memory": "512",
-    "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
-    "containerDefinitions": [
-        {
-            "name": "frontend",
-            "image": "${FRONTEND_IMAGE}:latest",
-            "essential": true,
-            "portMappings": [
-                {
-                    "containerPort": 80,
-                    "protocol": "tcp"
-                }
-            ],
-            "environment": [
-                {"name": "API_URL", "value": "${API_URL:-http://localhost:3001}"}
-            ],
-            "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                    "awslogs-group": "/ecs/journal-recommender-frontend",
-                    "awslogs-region": "${AWS_DEFAULT_REGION}",
-                    "awslogs-stream-prefix": "ecs",
-                    "awslogs-create-group": "true"
+    # Frontend task definition - use env vars from .env.deploy
+    aws_cli ecs register-task-definition --cli-input-json "{
+        \"family\": \"${ECS_SERVICE_FRONTEND}\",
+        \"networkMode\": \"awsvpc\",
+        \"requiresCompatibilities\": [\"FARGATE\"],
+        \"cpu\": \"256\",
+        \"memory\": \"512\",
+        \"executionRoleArn\": \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole\",
+        \"containerDefinitions\": [
+            {
+                \"name\": \"frontend\",
+                \"image\": \"${FRONTEND_IMAGE}:latest\",
+                \"essential\": true,
+                \"portMappings\": [
+                    {
+                        \"containerPort\": 80,
+                        \"protocol\": \"tcp\"
+                    }
+                ],
+                \"environment\": [
+                    {\"name\": \"API_URL\", \"value\": \"${API_URL}\"}
+                ],
+                \"logConfiguration\": {
+                    \"logDriver\": \"awslogs\",
+                    \"options\": {
+                        \"awslogs-group\": \"/ecs/${ECS_SERVICE_FRONTEND}\",
+                        \"awslogs-region\": \"${AWS_DEFAULT_REGION}\",
+                        \"awslogs-stream-prefix\": \"ecs\",
+                        \"awslogs-create-group\": \"true\"
+                    }
                 }
             }
-        }
-    ]
-}
-EOF
-
-    aws_cli ecs register-task-definition --cli-input-json "file://$TASK_DEF_DIR/frontend-task-def.json" >/dev/null
-    log_info "Registered frontend task definition"
-
-    # Keep task definitions for reference (gitignored)
-    log_info "Task definitions saved to $TASK_DEF_DIR/"
+        ]
+    }" >/dev/null
+    log_info "Registered frontend task definition: ${ECS_SERVICE_FRONTEND}"
 }
 
 # Setup ALB target groups
 setup_alb_target_groups() {
     log_info "Setting up ALB target groups..."
 
+    # Derive target group names from env vars
+    BACKEND_TG_NAME="${ECS_SERVICE_BACKEND}-tg"
+    FRONTEND_TG_NAME="${ECS_SERVICE_FRONTEND}-tg"
+
     # Get VPC ID from ALB
-    ALB_ARN=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME:-bibmanager-alb}" --query "LoadBalancers[0].LoadBalancerArn" --output text)
-    VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME:-bibmanager-alb}" --query "LoadBalancers[0].VpcId" --output text)
+    ALB_ARN=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME}" --query "LoadBalancers[0].LoadBalancerArn" --output text)
+    VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME}" --query "LoadBalancers[0].VpcId" --output text)
 
     log_info "Using ALB: $ALB_ARN"
     log_info "VPC: $VPC_ID"
 
     # Create backend target group
-    if aws_cli elbv2 describe-target-groups --names "journal-rec-backend-tg" >/dev/null 2>&1; then
-        log_warn "Backend target group already exists"
+    if aws_cli elbv2 describe-target-groups --names "${BACKEND_TG_NAME}" >/dev/null 2>&1; then
+        log_warn "Backend target group already exists: ${BACKEND_TG_NAME}"
     else
         aws_cli elbv2 create-target-group \
-            --name "journal-rec-backend-tg" \
+            --name "${BACKEND_TG_NAME}" \
             --protocol HTTP \
             --port 3001 \
             --vpc-id "$VPC_ID" \
             --target-type ip \
             --health-check-path "/api/health" \
             --health-check-interval-seconds 30 >/dev/null
-        log_info "Created backend target group"
+        log_info "Created backend target group: ${BACKEND_TG_NAME}"
     fi
 
     # Create frontend target group
-    if aws_cli elbv2 describe-target-groups --names "journal-rec-frontend-tg" >/dev/null 2>&1; then
-        log_warn "Frontend target group already exists"
+    if aws_cli elbv2 describe-target-groups --names "${FRONTEND_TG_NAME}" >/dev/null 2>&1; then
+        log_warn "Frontend target group already exists: ${FRONTEND_TG_NAME}"
     else
         aws_cli elbv2 create-target-group \
-            --name "journal-rec-frontend-tg" \
+            --name "${FRONTEND_TG_NAME}" \
             --protocol HTTP \
             --port 80 \
             --vpc-id "$VPC_ID" \
             --target-type ip \
             --health-check-path "/health" \
             --health-check-interval-seconds 30 >/dev/null
-        log_info "Created frontend target group"
+        log_info "Created frontend target group: ${FRONTEND_TG_NAME}"
     fi
 }
 
@@ -303,26 +293,32 @@ setup_alb_target_groups() {
 create_ecs_services() {
     log_info "Creating/Updating ECS services..."
 
-    CLUSTER_NAME="${ECS_CLUSTER:-jrs-cluster}"
+    # Use env vars from .env.deploy
+    CLUSTER_NAME="${ECS_CLUSTER}"
+    BACKEND_SERVICE="${ECS_SERVICE_BACKEND}"
+    FRONTEND_SERVICE="${ECS_SERVICE_FRONTEND}"
+    SG_NAME="${ECS_CLUSTER}-sg"
+    BACKEND_TG_NAME="${ECS_SERVICE_BACKEND}-tg"
+    FRONTEND_TG_NAME="${ECS_SERVICE_FRONTEND}-tg"
 
     # Get subnet and security group info
-    VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME:-bibmanager-alb}" --query "LoadBalancers[0].VpcId" --output text)
+    VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME}" --query "LoadBalancers[0].VpcId" --output text)
     SUBNETS=$(aws_cli ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query "Subnets[?MapPublicIpOnLaunch==\`true\`].SubnetId" --output text | tr '\t' ',')
 
     # Get or create security group
-    SG_ID=$(aws_cli ec2 describe-security-groups --filters "Name=group-name,Values=journal-recommender-ecs-sg" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+    SG_ID=$(aws_cli ec2 describe-security-groups --filters "Name=group-name,Values=${SG_NAME}" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
 
     if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
-        log_info "Creating security group..."
+        log_info "Creating security group: ${SG_NAME}"
         SG_ID=$(aws_cli ec2 create-security-group \
-            --group-name "journal-recommender-ecs-sg" \
-            --description "Security group for Journal Recommender ECS tasks" \
+            --group-name "${SG_NAME}" \
+            --description "Security group for ${ECS_CLUSTER} ECS tasks" \
             --vpc-id "$VPC_ID" \
             --query "GroupId" --output text)
 
         # Allow inbound traffic on ports 80 and 3001
-        aws_cli ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0
-        aws_cli ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3001 --cidr 0.0.0.0/0
+        aws_cli ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 80 --cidr 0.0.0.0/0 >/dev/null
+        aws_cli ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 3001 --cidr 0.0.0.0/0 >/dev/null
         # Allow outbound traffic
         aws_cli ec2 authorize-security-group-egress --group-id "$SG_ID" --protocol -1 --cidr 0.0.0.0/0 2>/dev/null || true
     fi
@@ -331,47 +327,47 @@ create_ecs_services() {
     log_info "Using subnets: $SUBNETS"
 
     # Get target group ARNs
-    BACKEND_TG_ARN=$(aws_cli elbv2 describe-target-groups --names "journal-rec-backend-tg" --query "TargetGroups[0].TargetGroupArn" --output text)
-    FRONTEND_TG_ARN=$(aws_cli elbv2 describe-target-groups --names "journal-rec-frontend-tg" --query "TargetGroups[0].TargetGroupArn" --output text)
+    BACKEND_TG_ARN=$(aws_cli elbv2 describe-target-groups --names "${BACKEND_TG_NAME}" --query "TargetGroups[0].TargetGroupArn" --output text)
+    FRONTEND_TG_ARN=$(aws_cli elbv2 describe-target-groups --names "${FRONTEND_TG_NAME}" --query "TargetGroups[0].TargetGroupArn" --output text)
 
     # Create or update backend service
-    if aws_cli ecs describe-services --cluster "$CLUSTER_NAME" --services "journal-recommender-backend" --query "services[?status=='ACTIVE']" | grep -q "journal-recommender-backend"; then
+    if aws_cli ecs describe-services --cluster "$CLUSTER_NAME" --services "${BACKEND_SERVICE}" --query "services[?status=='ACTIVE']" 2>/dev/null | grep -q "${BACKEND_SERVICE}"; then
         log_info "Updating backend service..."
         aws_cli ecs update-service \
             --cluster "$CLUSTER_NAME" \
-            --service "journal-recommender-backend" \
-            --task-definition "journal-recommender-backend" \
-            --force-new-deployment
+            --service "${BACKEND_SERVICE}" \
+            --task-definition "${BACKEND_SERVICE}" \
+            --force-new-deployment >/dev/null
     else
-        log_info "Creating backend service..."
+        log_info "Creating backend service: ${BACKEND_SERVICE}"
         aws_cli ecs create-service \
             --cluster "$CLUSTER_NAME" \
-            --service-name "journal-recommender-backend" \
-            --task-definition "journal-recommender-backend" \
+            --service-name "${BACKEND_SERVICE}" \
+            --task-definition "${BACKEND_SERVICE}" \
             --desired-count 1 \
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-            --load-balancers "targetGroupArn=$BACKEND_TG_ARN,containerName=backend,containerPort=3001"
+            --load-balancers "targetGroupArn=$BACKEND_TG_ARN,containerName=backend,containerPort=3001" >/dev/null
     fi
 
     # Create or update frontend service
-    if aws_cli ecs describe-services --cluster "$CLUSTER_NAME" --services "journal-recommender-frontend" --query "services[?status=='ACTIVE']" | grep -q "journal-recommender-frontend"; then
+    if aws_cli ecs describe-services --cluster "$CLUSTER_NAME" --services "${FRONTEND_SERVICE}" --query "services[?status=='ACTIVE']" 2>/dev/null | grep -q "${FRONTEND_SERVICE}"; then
         log_info "Updating frontend service..."
         aws_cli ecs update-service \
             --cluster "$CLUSTER_NAME" \
-            --service "journal-recommender-frontend" \
-            --task-definition "journal-recommender-frontend" \
-            --force-new-deployment
+            --service "${FRONTEND_SERVICE}" \
+            --task-definition "${FRONTEND_SERVICE}" \
+            --force-new-deployment >/dev/null
     else
-        log_info "Creating frontend service..."
+        log_info "Creating frontend service: ${FRONTEND_SERVICE}"
         aws_cli ecs create-service \
             --cluster "$CLUSTER_NAME" \
-            --service-name "journal-recommender-frontend" \
-            --task-definition "journal-recommender-frontend" \
+            --service-name "${FRONTEND_SERVICE}" \
+            --task-definition "${FRONTEND_SERVICE}" \
             --desired-count 1 \
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-            --load-balancers "targetGroupArn=$FRONTEND_TG_ARN,containerName=frontend,containerPort=80"
+            --load-balancers "targetGroupArn=$FRONTEND_TG_ARN,containerName=frontend,containerPort=80" >/dev/null
     fi
 
     log_info "ECS services created/updated"
