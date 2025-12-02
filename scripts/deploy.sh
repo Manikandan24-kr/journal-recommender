@@ -57,10 +57,16 @@ load_env() {
         "AWS_ACCOUNT_ID"
         "ECR_BACKEND_REPO"
         "ECR_FRONTEND_REPO"
+        "ECS_CLUSTER"
+        "ECS_SERVICE_BACKEND"
+        "ECS_SERVICE_FRONTEND"
         "RDS_HOST"
         "RDS_DATABASE"
         "RDS_USERNAME"
         "RDS_PASSWORD"
+        "ALB_NAME"
+        "AUTH_EMAIL"
+        "AUTH_PASSWORD"
     )
 
     for var in "${required_vars[@]}"; do
@@ -75,6 +81,11 @@ load_env() {
     BACKEND_IMAGE="${ECR_REGISTRY}/${ECR_BACKEND_REPO}"
     FRONTEND_IMAGE="${ECR_REGISTRY}/${ECR_FRONTEND_REPO}"
     DATABASE_URL="postgresql://${RDS_USERNAME}:${RDS_PASSWORD}@${RDS_HOST}:${RDS_PORT:-5432}/${RDS_DATABASE}"
+
+    # Derive APP_DOMAIN from API_URL if not set
+    if [ -z "$APP_DOMAIN" ]; then
+        APP_DOMAIN=$(echo "$API_URL" | sed 's|https://||' | sed 's|http://||' | sed 's|/.*||')
+    fi
 }
 
 # Run AWS CLI command (via Docker or local)
@@ -119,13 +130,15 @@ build_images() {
 
     cd "$PROJECT_ROOT"
 
-    # Build backend
+    # Build backend (--platform linux/amd64 required for ECS Fargate)
     log_info "Building backend image..."
-    docker build -t "${ECR_BACKEND_REPO}:latest" -f backend/Dockerfile backend/
+    docker build --platform linux/amd64 \
+        -t "${ECR_BACKEND_REPO}:latest" \
+        -f backend/Dockerfile backend/
 
-    # Build frontend with API URL
+    # Build frontend with API URL (--platform linux/amd64 required for ECS Fargate)
     log_info "Building frontend image..."
-    docker build \
+    docker build --platform linux/amd64 \
         -t "${ECR_FRONTEND_REPO}:latest" \
         --build-arg VITE_API_URL="${API_URL:-http://localhost:3001}" \
         -f frontend/Dockerfile frontend/
@@ -190,7 +203,9 @@ create_task_definitions() {
                 \"environment\": [
                     {\"name\": \"NODE_ENV\", \"value\": \"production\"},
                     {\"name\": \"PORT\", \"value\": \"3001\"},
-                    {\"name\": \"DATABASE_URL\", \"value\": \"${DATABASE_URL}\"}
+                    {\"name\": \"DATABASE_URL\", \"value\": \"${DATABASE_URL}\"},
+                    {\"name\": \"AUTH_EMAIL\", \"value\": \"${AUTH_EMAIL}\"},
+                    {\"name\": \"AUTH_PASSWORD\", \"value\": \"${AUTH_PASSWORD}\"}
                 ]
             }
         ]
@@ -292,33 +307,36 @@ setup_alb_target_groups() {
         exit 1
     fi
 
-    # Add listener rule for API paths -> backend (priority 100)
-    EXISTING_RULE=$(aws_cli elbv2 describe-rules --listener-arn "$LISTENER_ARN" --query "Rules[?Conditions[?Field=='path-pattern' && Values[?contains(@, '/api/*')]]].RuleArn" --output text 2>/dev/null)
-
-    if [ -z "$EXISTING_RULE" ] || [ "$EXISTING_RULE" == "None" ]; then
-        log_info "Creating listener rule for /api/* -> backend"
-        aws_cli elbv2 create-rule \
-            --listener-arn "$LISTENER_ARN" \
-            --priority 100 \
-            --conditions "Field=path-pattern,Values=/api/*" \
-            --actions "Type=forward,TargetGroupArn=$BACKEND_TG_ARN" >/dev/null
-    else
-        log_warn "Listener rule for /api/* already exists"
-    fi
-
-    # Add listener rule for frontend (default or lower priority)
+    # Check for existing rules for our target groups
+    log_info "Setting up listener rules for domain: $APP_DOMAIN"
+    EXISTING_BACKEND_RULE=$(aws_cli elbv2 describe-rules --listener-arn "$LISTENER_ARN" --query "Rules[?Actions[?TargetGroupArn=='${BACKEND_TG_ARN}']].RuleArn" --output text 2>/dev/null)
     EXISTING_FRONTEND_RULE=$(aws_cli elbv2 describe-rules --listener-arn "$LISTENER_ARN" --query "Rules[?Actions[?TargetGroupArn=='${FRONTEND_TG_ARN}']].RuleArn" --output text 2>/dev/null)
 
-    if [ -z "$EXISTING_FRONTEND_RULE" ] || [ "$EXISTING_FRONTEND_RULE" == "None" ]; then
-        log_info "Creating listener rule for /* -> frontend"
-        aws_cli elbv2 create-rule \
-            --listener-arn "$LISTENER_ARN" \
-            --priority 200 \
-            --conditions "Field=path-pattern,Values=/*" \
-            --actions "Type=forward,TargetGroupArn=$FRONTEND_TG_ARN" >/dev/null
-    else
-        log_warn "Listener rule for frontend already exists"
+    # Delete existing rules if they exist (to recreate with correct host-header conditions)
+    if [ -n "$EXISTING_BACKEND_RULE" ] && [ "$EXISTING_BACKEND_RULE" != "None" ]; then
+        log_info "Removing existing backend listener rule to recreate with host-header condition"
+        aws_cli elbv2 delete-rule --rule-arn "$EXISTING_BACKEND_RULE" 2>/dev/null || true
     fi
+    if [ -n "$EXISTING_FRONTEND_RULE" ] && [ "$EXISTING_FRONTEND_RULE" != "None" ]; then
+        log_info "Removing existing frontend listener rule to recreate with host-header condition"
+        aws_cli elbv2 delete-rule --rule-arn "$EXISTING_FRONTEND_RULE" 2>/dev/null || true
+    fi
+
+    # Create backend rule: host-header + path-pattern (priority 100)
+    log_info "Creating listener rule for $APP_DOMAIN/api/* -> backend"
+    aws_cli elbv2 create-rule \
+        --listener-arn "$LISTENER_ARN" \
+        --priority 100 \
+        --conditions "[{\"Field\":\"host-header\",\"HostHeaderConfig\":{\"Values\":[\"$APP_DOMAIN\"]}},{\"Field\":\"path-pattern\",\"PathPatternConfig\":{\"Values\":[\"/api/*\"]}}]" \
+        --actions "[{\"Type\":\"forward\",\"TargetGroupArn\":\"$BACKEND_TG_ARN\"}]" >/dev/null 2>&1 || log_warn "Backend rule may already exist"
+
+    # Create frontend rule: host-header only (priority 200)
+    log_info "Creating listener rule for $APP_DOMAIN/* -> frontend"
+    aws_cli elbv2 create-rule \
+        --listener-arn "$LISTENER_ARN" \
+        --priority 200 \
+        --conditions "[{\"Field\":\"host-header\",\"HostHeaderConfig\":{\"Values\":[\"$APP_DOMAIN\"]}}]" \
+        --actions "[{\"Type\":\"forward\",\"TargetGroupArn\":\"$FRONTEND_TG_ARN\"}]" >/dev/null 2>&1 || log_warn "Frontend rule may already exist"
 
     log_info "ALB target groups and listener rules configured"
 }
@@ -336,8 +354,10 @@ create_ecs_services() {
     FRONTEND_TG_NAME="${ECS_SERVICE_FRONTEND}-tg"
 
     # Get subnet and security group info
+    # IMPORTANT: Use only subnets in the same AZs as the ALB to avoid "Target is in an Availability Zone that is not enabled for the load balancer" error
     VPC_ID=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME}" --query "LoadBalancers[0].VpcId" --output text)
-    SUBNETS=$(aws_cli ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query "Subnets[?MapPublicIpOnLaunch==\`true\`].SubnetId" --output text | tr '\t' ',')
+    SUBNETS=$(aws_cli elbv2 describe-load-balancers --names "${ALB_NAME}" --query "LoadBalancers[0].AvailabilityZones[*].SubnetId" --output text | tr '\t' ',')
+    log_info "Using ALB subnets: $SUBNETS"
 
     # Get or create security group
     SG_ID=$(aws_cli ec2 describe-security-groups --filters "Name=group-name,Values=${SG_NAME}" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
