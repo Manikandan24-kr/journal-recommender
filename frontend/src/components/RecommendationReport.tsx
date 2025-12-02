@@ -218,7 +218,7 @@ const RecommendationReport: React.FC<RecommendationReportProps> = ({
             </svg>
           </div>
           <div>
-            <h4 className="font-semibold text-violet-900 mb-1 text-sm sm:text-base">AI Analysis Summary</h4>
+            <h4 className="font-semibold text-violet-900 mb-1 text-sm sm:text-base">Analysis Summary</h4>
             <p className="text-xs sm:text-sm text-violet-700">{analysisNotes}</p>
           </div>
         </div>

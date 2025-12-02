@@ -101,7 +101,7 @@ function MainApp() {
                 </h1>
               </div>
               <p className="text-sm sm:text-base text-gray-500 ml-8 sm:ml-12">
-                Upload your manuscript and let AI find the perfect journals for your research
+                Upload your manuscript to find the perfect journals for your research
               </p>
             </div>
           )}

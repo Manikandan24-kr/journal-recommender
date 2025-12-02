@@ -1,7 +1,5 @@
 import React, { useState } from 'react';
 import {
-  ExternalLink,
-  Clock,
   TrendingUp,
   CheckCircle,
   AlertCircle,
@@ -140,28 +138,6 @@ const RecommendationCard: React.FC<RecommendationCardProps> = ({
           </span>
         </div>
 
-        {/* Quick Stats Row */}
-        <div className="grid grid-cols-2 gap-3 sm:gap-4 mb-4">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 sm:p-2 bg-orange-50 rounded-lg flex-shrink-0">
-              <Clock className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-orange-600" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs text-gray-500">Review Time</p>
-              <p className="font-semibold text-gray-900 text-sm sm:text-base truncate">{journal.reviewTime}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 sm:p-2 bg-green-50 rounded-lg flex-shrink-0">
-              <TrendingUp className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-green-600" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs text-gray-500">Acceptance</p>
-              <p className="font-semibold text-gray-900 text-sm sm:text-base">{journal.acceptanceRate}%</p>
-            </div>
-          </div>
-        </div>
-
         {/* Indexed In */}
         <div className="mb-3 sm:mb-4">
           <p className="text-xs font-medium text-gray-500 mb-1.5 sm:mb-2">Indexed in</p>
@@ -264,18 +240,6 @@ const RecommendationCard: React.FC<RecommendationCardProps> = ({
               </div>
             )}
 
-            {/* Action Button */}
-            <div className="pt-3 sm:pt-4 border-t border-gray-200">
-              <a
-                href={journal.website}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 px-3 sm:px-4 py-2 bg-violet-600 text-white text-xs sm:text-sm font-medium rounded-lg hover:bg-violet-700 transition-colors w-full sm:w-auto justify-center sm:justify-start"
-              >
-                Visit Journal Website
-                <ExternalLink className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-              </a>
-            </div>
           </div>
         )}
       </div>
