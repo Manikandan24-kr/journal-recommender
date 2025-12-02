@@ -4,22 +4,24 @@ set -e
 # =============================================================================
 # Journal Recommender - AWS Deployment Script
 # =============================================================================
-# This script builds Docker images, pushes to ECR, and updates ECS services.
+# Single command to deploy the entire application to AWS ECS.
 #
 # Usage:
-#   ./scripts/deploy.sh [command]
+#   npm run deploy
+#   # or
+#   ./scripts/deploy.sh
 #
-# Commands:
-#   all         - Run full deployment (default)
-#   setup       - Create ECR repos, ECS cluster, task definitions, ALB config
-#   build       - Build Docker images only
-#   push        - Push images to ECR only
-#   deploy      - Update ECS services only
-#   db-setup    - Initialize database schema
+# What it does (all idempotent - safe to run multiple times):
+#   1. Creates ECR repositories (if not exists)
+#   2. Creates ECS cluster (if not exists)
+#   3. Sets up ALB target groups (if not exists)
+#   4. Creates database and schema (if not exists)
+#   5. Builds and pushes Docker images
+#   6. Creates/updates ECS task definitions and services
 #
 # Prerequisites:
 #   - Docker installed and running
-#   - .env.deploy file with AWS credentials (copy from .env.deploy.example)
+#   - .env.deploy file configured (copy from .env.deploy.example)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -375,71 +377,101 @@ create_ecs_services() {
 setup_database() {
     log_info "Setting up database..."
 
-    # Run init.sql against RDS
-    if command -v psql &> /dev/null; then
-        PGPASSWORD="$RDS_PASSWORD" psql \
-            -h "$RDS_HOST" \
-            -U "$RDS_USERNAME" \
-            -d "$RDS_DATABASE" \
-            -f "$PROJECT_ROOT/backend/database/init.sql"
+    # Helper function to run psql commands
+    run_psql() {
+        local db="$1"
+        local cmd="$2"
+        if command -v psql &> /dev/null; then
+            PGPASSWORD="$RDS_PASSWORD" psql \
+                "host=$RDS_HOST port=${RDS_PORT:-5432} user=$RDS_USERNAME dbname=$db sslmode=require" \
+                -c "$cmd"
+        else
+            docker run --rm \
+                -e PGPASSWORD="$RDS_PASSWORD" \
+                postgres:16-alpine \
+                psql "host=$RDS_HOST port=${RDS_PORT:-5432} user=$RDS_USERNAME dbname=$db sslmode=require" \
+                -c "$cmd"
+        fi
+    }
+
+    # Helper function to run psql with file
+    run_psql_file() {
+        local db="$1"
+        local file="$2"
+        if command -v psql &> /dev/null; then
+            PGPASSWORD="$RDS_PASSWORD" psql \
+                "host=$RDS_HOST port=${RDS_PORT:-5432} user=$RDS_USERNAME dbname=$db sslmode=require" \
+                -f "$file"
+        else
+            docker run --rm \
+                -e PGPASSWORD="$RDS_PASSWORD" \
+                -v "$file:/init.sql:ro" \
+                postgres:16-alpine \
+                psql "host=$RDS_HOST port=${RDS_PORT:-5432} user=$RDS_USERNAME dbname=$db sslmode=require" \
+                -f /init.sql
+        fi
+    }
+
+    # Step 1: Create database if it doesn't exist
+    log_info "Checking if database '$RDS_DATABASE' exists..."
+    DB_EXISTS=$(run_psql "postgres" "SELECT 1 FROM pg_database WHERE datname = '$RDS_DATABASE';" 2>/dev/null | grep -c "1" || true)
+
+    if [ "$DB_EXISTS" -eq 0 ]; then
+        log_info "Creating database '$RDS_DATABASE'..."
+        run_psql "postgres" "CREATE DATABASE $RDS_DATABASE;"
+        log_info "Database created"
     else
-        # Use Docker to run psql
-        docker run --rm \
-            -e PGPASSWORD="$RDS_PASSWORD" \
-            -v "$PROJECT_ROOT/backend/database/init.sql:/init.sql:ro" \
-            postgres:16-alpine \
-            psql -h "$RDS_HOST" -U "$RDS_USERNAME" -d "$RDS_DATABASE" -f /init.sql
+        log_info "Database '$RDS_DATABASE' already exists"
     fi
 
-    log_info "Database initialized"
+    # Step 2: Run idempotent init.sql to create/update schema
+    log_info "Running schema initialization (idempotent)..."
+    run_psql_file "$RDS_DATABASE" "$PROJECT_ROOT/backend/database/init.sql"
+
+    log_info "Database setup complete"
 }
 
-# Full setup (first-time deployment)
-setup() {
-    log_info "Running initial setup..."
+# Full deployment - runs everything
+deploy() {
+    log_info "=========================================="
+    log_info "Starting full deployment..."
+    log_info "=========================================="
+
+    # Step 1: Create AWS infrastructure (idempotent)
+    log_info "[1/6] Creating ECR repositories..."
     create_ecr_repos
-    create_ecs_cluster
-    setup_alb_target_groups
-    create_task_definitions
-}
 
-# Full deployment
-deploy_all() {
-    log_info "Running full deployment..."
+    log_info "[2/6] Creating ECS cluster..."
+    create_ecs_cluster
+
+    log_info "[3/6] Setting up ALB target groups..."
+    setup_alb_target_groups
+
+    # Step 2: Setup database (idempotent)
+    log_info "[4/6] Setting up database..."
+    setup_database
+
+    # Step 3: Build and push images
+    log_info "[5/6] Building and pushing Docker images..."
     build_images
     push_images
+
+    # Step 4: Create task definitions and deploy services
+    log_info "[6/6] Deploying to ECS..."
+    create_task_definitions
     create_ecs_services
+
+    log_info "=========================================="
     log_info "Deployment complete!"
+    log_info "=========================================="
+    log_info "Frontend: https://jrs.kriyadocs.com"
+    log_info "API: https://jrs.kriyadocs.com/api"
 }
 
 # Main
 main() {
     load_env
-
-    case "${1:-all}" in
-        setup)
-            setup
-            ;;
-        build)
-            build_images
-            ;;
-        push)
-            push_images
-            ;;
-        deploy)
-            create_ecs_services
-            ;;
-        db-setup)
-            setup_database
-            ;;
-        all)
-            deploy_all
-            ;;
-        *)
-            echo "Usage: $0 {setup|build|push|deploy|db-setup|all}"
-            exit 1
-            ;;
-    esac
+    deploy
 }
 
 main "$@"

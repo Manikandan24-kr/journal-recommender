@@ -1,11 +1,12 @@
 -- Journal Recommender Database Schema
+-- IDEMPOTENT: Safe to run multiple times
 
 -- Enable extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";  -- For fuzzy text search
 
 -- Journals table
-CREATE TABLE journals (
+CREATE TABLE IF NOT EXISTS journals (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     source_id VARCHAR(50) UNIQUE NOT NULL,
     title VARCHAR(500) NOT NULL,
@@ -19,7 +20,7 @@ CREATE TABLE journals (
 );
 
 -- Journal ISSN (multiple per journal)
-CREATE TABLE journal_issn (
+CREATE TABLE IF NOT EXISTS journal_issn (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     journal_id UUID REFERENCES journals(id) ON DELETE CASCADE,
     issn VARCHAR(20) NOT NULL,
@@ -27,7 +28,7 @@ CREATE TABLE journal_issn (
 );
 
 -- Journal metrics
-CREATE TABLE journal_metrics (
+CREATE TABLE IF NOT EXISTS journal_metrics (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     journal_id UUID UNIQUE REFERENCES journals(id) ON DELETE CASCADE,
     sjr DECIMAL(10,4),
@@ -41,7 +42,7 @@ CREATE TABLE journal_metrics (
 );
 
 -- Journal scope/description
-CREATE TABLE journal_scopes (
+CREATE TABLE IF NOT EXISTS journal_scopes (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     journal_id UUID UNIQUE REFERENCES journals(id) ON DELETE CASCADE,
     scope_text TEXT,
@@ -49,27 +50,27 @@ CREATE TABLE journal_scopes (
 );
 
 -- Subject areas
-CREATE TABLE subject_areas (
+CREATE TABLE IF NOT EXISTS subject_areas (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(255) UNIQUE NOT NULL
 );
 
 -- Journal-Area relationship
-CREATE TABLE journal_areas (
+CREATE TABLE IF NOT EXISTS journal_areas (
     journal_id UUID REFERENCES journals(id) ON DELETE CASCADE,
     area_id UUID REFERENCES subject_areas(id) ON DELETE CASCADE,
     PRIMARY KEY (journal_id, area_id)
 );
 
 -- Categories with quartile rankings
-CREATE TABLE categories (
+CREATE TABLE IF NOT EXISTS categories (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(255) NOT NULL,
     UNIQUE(name)
 );
 
 -- Journal-Category relationship with quartile
-CREATE TABLE journal_categories (
+CREATE TABLE IF NOT EXISTS journal_categories (
     journal_id UUID REFERENCES journals(id) ON DELETE CASCADE,
     category_id UUID REFERENCES categories(id) ON DELETE CASCADE,
     quartile VARCHAR(5),
@@ -77,7 +78,7 @@ CREATE TABLE journal_categories (
 );
 
 -- Manuscripts (user uploads)
-CREATE TABLE manuscripts (
+CREATE TABLE IF NOT EXISTS manuscripts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title VARCHAR(1000) NOT NULL,
     abstract TEXT,
@@ -89,7 +90,7 @@ CREATE TABLE manuscripts (
 );
 
 -- Analysis results
-CREATE TABLE analysis_results (
+CREATE TABLE IF NOT EXISTS analysis_results (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     manuscript_id UUID REFERENCES manuscripts(id) ON DELETE CASCADE,
     suggested_keywords TEXT[],
@@ -98,7 +99,7 @@ CREATE TABLE analysis_results (
 );
 
 -- Journal recommendations
-CREATE TABLE recommendations (
+CREATE TABLE IF NOT EXISTS recommendations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     analysis_id UUID REFERENCES analysis_results(id) ON DELETE CASCADE,
     journal_id UUID REFERENCES journals(id) ON DELETE CASCADE,
@@ -111,7 +112,7 @@ CREATE TABLE recommendations (
 );
 
 -- Search history (for analytics)
-CREATE TABLE search_history (
+CREATE TABLE IF NOT EXISTS search_history (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_session_id VARCHAR(100),
     query_type VARCHAR(50), -- 'file_upload', 'text_input', 'browse'
@@ -120,21 +121,21 @@ CREATE TABLE search_history (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Indexes for better query performance
-CREATE INDEX idx_journals_title ON journals USING gin(title gin_trgm_ops);
-CREATE INDEX idx_journals_publisher ON journals(publisher);
-CREATE INDEX idx_journal_metrics_sjr ON journal_metrics(sjr DESC);
-CREATE INDEX idx_journal_metrics_h_index ON journal_metrics(h_index DESC);
-CREATE INDEX idx_journal_metrics_quartile ON journal_metrics(sjr_quartile);
-CREATE INDEX idx_journal_scopes_text ON journal_scopes USING gin(scope_text gin_trgm_ops);
-CREATE INDEX idx_recommendations_score ON recommendations(match_score DESC);
-CREATE INDEX idx_manuscripts_session ON manuscripts(user_session_id);
+-- Indexes for better query performance (IF NOT EXISTS)
+CREATE INDEX IF NOT EXISTS idx_journals_title ON journals USING gin(title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_journals_publisher ON journals(publisher);
+CREATE INDEX IF NOT EXISTS idx_journal_metrics_sjr ON journal_metrics(sjr DESC);
+CREATE INDEX IF NOT EXISTS idx_journal_metrics_h_index ON journal_metrics(h_index DESC);
+CREATE INDEX IF NOT EXISTS idx_journal_metrics_quartile ON journal_metrics(sjr_quartile);
+CREATE INDEX IF NOT EXISTS idx_journal_scopes_text ON journal_scopes USING gin(scope_text gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_recommendations_score ON recommendations(match_score DESC);
+CREATE INDEX IF NOT EXISTS idx_manuscripts_session ON manuscripts(user_session_id);
 
 -- Full-text search index
-CREATE INDEX idx_journals_fts ON journals USING gin(to_tsvector('english', title));
-CREATE INDEX idx_scopes_fts ON journal_scopes USING gin(to_tsvector('english', scope_text));
+CREATE INDEX IF NOT EXISTS idx_journals_fts ON journals USING gin(to_tsvector('english', title));
+CREATE INDEX IF NOT EXISTS idx_scopes_fts ON journal_scopes USING gin(to_tsvector('english', scope_text));
 
--- Trigger to update timestamps
+-- Trigger function to update timestamps (CREATE OR REPLACE is idempotent)
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -143,16 +144,19 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
+-- Drop and recreate triggers (idempotent approach)
+DROP TRIGGER IF EXISTS update_journals_updated_at ON journals;
 CREATE TRIGGER update_journals_updated_at
     BEFORE UPDATE ON journals
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_journal_metrics_updated_at ON journal_metrics;
 CREATE TRIGGER update_journal_metrics_updated_at
     BEFORE UPDATE ON journal_metrics
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- View for easy journal querying
-CREATE VIEW v_journals_full AS
+-- View for easy journal querying (CREATE OR REPLACE is idempotent)
+CREATE OR REPLACE VIEW v_journals_full AS
 SELECT
     j.id,
     j.source_id,
